@@ -11,8 +11,8 @@
  *  3. 状态变化 → 执行 exit + enter
  *  4. 状态不变 → 执行 hold
  *  5. 手动强制设置状态使用 setState()
- *  6. 构造时必须传入初始状态 + 决策函数
- *  7. 校验函数 validator 为可选，用于防止非法强转状态
+ *  6. 构造时必须传入初始状态 + 仲裁函数 resolver
+ *  7. 校验函数 validator 为可选，用于防止非法数值强转状态枚举
  *
  * 使用方式：
  *  1. 定义状态枚举 StateEnum
@@ -43,8 +43,8 @@ public:
     /**
      * @brief 构造函数
      * @param initialState 初始状态
-     * @param resolver 状态仲裁函数【根据当前状态决策目标状态】
-     * @param validator 可选：状态合法性校验，默认 nullptr
+     * @param resolver 状态仲裁函数【根据当前状态，走对应判断分支，决策目标状态】
+     * @param validator 可选：状态值 合法性校验，默认 nullptr
      * explicit 防止隐式构造，保证安全
      */
     explicit BasicFsm(StateEnum initialState,
