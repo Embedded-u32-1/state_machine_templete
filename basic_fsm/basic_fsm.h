@@ -1,7 +1,9 @@
 #pragma once
 
+#include <atomic>
 #include <functional>
 #include <map>
+#include <type_traits>
 
 /**
  * @brief 通用基础状态机（普通状态机）
@@ -15,18 +17,23 @@
  *  7. 校验函数 validator 为可选，用于防止非法数值强转状态枚举
  *
  * 使用方式：
- *  1. 定义状态枚举 StateEnum
- *  2. 构造 BasicFsm，传入初始状态和状态仲裁函数
- *  3. 调用 registerStateActions 注册每个状态的 enter/exit/hold
- *  4. 世界变化时调用 sync()
- *  5. 需要强制跳转状态时调用 setState()
+ *  1. 定义状态枚举（必须是 enum class）
+ *  2. 构造 BasicFsm，传入初始状态、状态行为、仲裁函数
+ *  3. 世界变化时调用 sync()
+ *  4. 需要强制跳转状态时调用 setState()
  *
- * 作为类成员使用推荐写法（C++11 及以上）;
+ * 线程安全：
+ *  - currentState() 读取是线程安全的（atomic）
+ *  - sync()/setState() 需要外部加锁保证串行执行
+ *  - resolver/validator 回调需要用户保证线程安全
  */
 
 template <typename StateEnum>
 class BasicFsm final
 {
+    // static_assert 检查 StateEnum 必须是 enum class（强类型枚举）
+    static_assert(std::is_scoped_enum_v<StateEnum>, "StateEnum must be an enum class (scoped enum)");
+
 public:
     using FsmRef    = BasicFsm&;
     using Action    = std::function<void(FsmRef)>;
@@ -43,17 +50,25 @@ public:
     /**
      * @brief 构造函数
      * @param initialState 初始状态
+     * @param stateActions 状态行为字典：key=状态枚举，value=对应行为
      * @param resolver 状态仲裁函数【根据当前状态，走对应判断分支，决策目标状态】
-     * @param validator 可选：状态值 合法性校验，默认 nullptr
-     * explicit 防止隐式构造，保证安全
+     * @param validator 可选：状态值合法性校验，默认 nullptr
+     * @attention resolver 不能为空，否则抛出 std::invalid_argument
+     * @attention stateActions 在构造后不可修改
      */
     explicit BasicFsm(StateEnum initialState,
+                      std::map<StateEnum, StateActions> stateActions,
                       Resolver resolver,
                       Validator validator = nullptr)
         : currentState_(initialState)
+        , stateActions_(std::move(stateActions))
         , resolver_(std::move(resolver))
         , validator_(std::move(validator))
     {
+        if (!resolver_)
+        {
+            throw std::invalid_argument("resolver cannot be null");
+        }
     }
 
     ~BasicFsm() = default;
@@ -65,21 +80,13 @@ public:
     BasicFsm& operator=(BasicFsm&&) = delete;
 
     /**
-     * @brief 注册所有状态的行为（enter/exit/hold）
-     * @param actions 字典：key=状态枚举，value=对应行为
-     */
-    void registerStateActions(const std::map<StateEnum, StateActions>& actions)
-    {
-        stateActions_ = actions;
-    }
-
-    /**
      * @brief 与世界状态同步（核心调用接口）
      * 会执行：仲裁 -> 状态切换 或 状态保持
+     * @attention 需要外部加锁保证线程安全
      */
     void sync()
     {
-        StateEnum desired = resolver_(currentState_);
+        StateEnum desired = resolver_(currentState_.load());
         setState(desired);
     }
 
@@ -89,6 +96,7 @@ public:
      * @attention 内部自动判断：
      *  目标 != 当前 → exit + enter
      *  目标 == 当前 → 执行 hold
+     * @attention 需要外部加锁保证线程安全
      */
     void setState(StateEnum target)
     {
@@ -98,24 +106,24 @@ public:
             return;
         }
 
-        if (target != currentState_)
+        if (target != currentState_.load())
         {
             // 退出旧状态
-            auto itOld = stateActions_.find(currentState_);
+            auto itOld = stateActions_.find(currentState_.load());
             if (itOld != stateActions_.end() && itOld->second.exit)
                 itOld->second.exit(*this);
 
-            currentState_ = target;
+            currentState_.store(target);
 
             // 进入新状态
-            auto itNew = stateActions_.find(currentState_);
+            auto itNew = stateActions_.find(target);
             if (itNew != stateActions_.end() && itNew->second.enter)
                 itNew->second.enter(*this);
         }
         else
         {
             // 状态保持
-            auto itCurr = stateActions_.find(currentState_);
+            auto itCurr = stateActions_.find(target);
             if (itCurr != stateActions_.end() && itCurr->second.hold)
                 itCurr->second.hold(*this);
         }
@@ -123,15 +131,16 @@ public:
 
     /**
      * @brief 获取当前状态
+     * @note 线程安全的原子读取
      */
     StateEnum currentState() const
     {
-        return currentState_;
+        return currentState_.load();
     }
 
 private:
-    StateEnum              currentState_;
-    Resolver               resolver_;
-    Validator              validator_;
-    std::map<StateEnum, StateActions> stateActions_;
+    std::atomic<StateEnum>               currentState_;
+    const std::map<StateEnum, StateActions> stateActions_;  // 不可修改
+    Resolver                              resolver_;
+    Validator                             validator_;
 };
