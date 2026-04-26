@@ -3,6 +3,7 @@
 #include <atomic>
 #include <functional>
 #include <map>
+#include <mutex>
 #include <type_traits>
 
 /**
@@ -23,9 +24,10 @@
  *       4. 需要强制跳转状态时调用 SetState()
  *
  * @note 线程安全：
+ *       - 内部使用 mutex 保证 Sync/SetState 串行执行
  *       - CurrentState() 读取是线程安全的（atomic）
- *       - Sync()/SetState() 需要外部加锁保证串行执行
- *       - resolver/validator 回调需要用户保证线程安全
+ *       - resolver/validator 回调如果涉及共享数据，用户需自行保证线程安全
+ *       - 递归检测：若在 enter/exit/hold 回调中调用 Sync/SetState，会抛出异常
  */
 
 template <typename StateEnum>
@@ -33,6 +35,27 @@ class BasicFsm final {
     // static_assert 检查 StateEnum 必须是 enum class（强类型枚举）
     static_assert(std::is_scoped_enum_v<StateEnum>,
                   "StateEnum must be an enum class (scoped enum)");
+
+    // RAII 递归检测守卫：防止在 enter/exit/hold 回调中调用 Sync/SetState
+    struct RecursionGuard {
+        // inline static thread_local：C++17 类内直接初始化，每个线程独立存储
+        // - inline: 允许类内初始化（C++17）
+        // - static: 类内共享
+        // - thread_local: 每个线程独立一份
+        // 原理：同一线程内递归构造会检测到 s_in_use == true，从而抛出异常
+        inline static thread_local bool s_in_use = false;
+
+        RecursionGuard() {
+            if (s_in_use) {
+                throw std::runtime_error("Recursive state transition detected");
+            }
+            s_in_use = true;
+        }
+
+        ~RecursionGuard() {
+            s_in_use = false;
+        }
+    };
 
 public:
     using FsmRef = BasicFsm&;
@@ -79,31 +102,47 @@ public:
     /**
      * @brief 与世界状态同步（核心调用接口）
      * @note 会执行：仲裁 -> 状态切换 或 状态保持
-     * @note 需要外部加锁保证线程安全
+     * @note 内部加锁保证线程安全，锁粒度覆盖整个仲裁+切换过程
+     * @note 防止递归：若在 enter/exit/hold 回调中调用 Sync()，会抛出异常
      */
     void Sync() {
+        RecursionGuard recursion_guard;                  // 1. 防递归
+        std::lock_guard<std::mutex> lock(action_mutex_);  // 2. 串行
         StateEnum desired = resolver_(current_state_.load());
-        SetState(desired);
+        SetStateInternal(desired);
     }
 
     /**
      * @brief 强制设置状态（teleport / reset 使用）
      * @param target 目标状态
      * @note 如果有 validator，则先校验合法性
+     * @note 内部加锁保证线程安全，锁粒度覆盖整个校验+切换过程
+     * @note 防止递归：若在 enter/exit/hold 回调中调用 SetState()，会抛出异常
+     */
+    void SetState(StateEnum target) {
+        RecursionGuard recursion_guard;                  // 1. 防递归
+        std::lock_guard<std::mutex> lock(action_mutex_);  // 2. 串行
+        SetStateInternal(target);
+    }
+
+private:
+    /**
+     * @brief 设置状态的核心逻辑（不带锁）
+     * @note 由 Sync/SetState 在持有锁的前提下调用
      * @note 内部自动判断：
      *       - 目标 != 当前 → exit + enter
      *       - 目标 == 当前 → 执行 hold
-     * @note 需要外部加锁保证线程安全
      */
-    void SetState(StateEnum target) {
+    inline void SetStateInternal(StateEnum target) {
         // 有校验函数 → 校验；没有则跳过
         if (validator_ && !validator_(target)) {
             return;
         }
 
-        if (target != current_state_.load()) {
+        StateEnum current = current_state_.load();
+        if (target != current) {
             // 退出旧状态
-            auto it_old = state_actions_.find(current_state_.load());
+            auto it_old = state_actions_.find(current);
             if (it_old != state_actions_.end() && it_old->second.exit) {
                 it_old->second.exit(*this);
             }
@@ -135,6 +174,7 @@ public:
 
 private:
     std::atomic<StateEnum> current_state_;
+    mutable std::mutex action_mutex_;  // 保证 Sync/SetState 串行执行
     const std::map<StateEnum, StateActions> state_actions_;  // 不可修改
     Resolver resolver_;
     Validator validator_;
