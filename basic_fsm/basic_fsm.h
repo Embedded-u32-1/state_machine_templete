@@ -4,6 +4,7 @@
 #include <functional>
 #include <map>
 #include <mutex>
+#include <stdexcept>
 #include <type_traits>
 
 /**
@@ -42,18 +43,18 @@ class BasicFsm final {
         // - inline: 允许类内初始化（C++17）
         // - static: 类内共享
         // - thread_local: 每个线程独立一份
-        // 原理：同一线程内递归构造会检测到 s_in_use == true，从而抛出异常
-        inline static thread_local bool s_in_use = false;
+        // 原理：同一线程内递归构造会检测到 s_in_use_ == true，从而抛出异常
+        inline static thread_local bool s_in_use_ = false;
 
         RecursionGuard() {
-            if (s_in_use) {
+            if (s_in_use_) {
                 throw std::runtime_error("Recursive state transition detected");
             }
-            s_in_use = true;
+            s_in_use_ = true;
         }
 
         ~RecursionGuard() {
-            s_in_use = false;
+            s_in_use_ = false;
         }
     };
 
@@ -125,6 +126,15 @@ public:
         SetStateInternal(target);
     }
 
+    /**
+     * @brief 获取当前状态
+     * @return StateEnum 当前状态枚举值
+     * @note 线程安全的原子读取
+     */
+    StateEnum CurrentState() const {
+        return current_state_.load();
+    }
+
 private:
     /**
      * @brief 设置状态的核心逻辑（不带锁）
@@ -161,15 +171,6 @@ private:
                 it_curr->second.hold(*this);
             }
         }
-    }
-
-    /**
-     * @brief 获取当前状态
-     * @return StateEnum 当前状态枚举值
-     * @note 线程安全的原子读取
-     */
-    StateEnum CurrentState() const {
-        return current_state_.load();
     }
 
 private:
