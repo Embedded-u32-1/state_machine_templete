@@ -66,7 +66,28 @@ public:
     using Action = std::function<void(FsmRef)>;
     using Resolver = std::function<StateEnum(StateEnum)>;
     using Validator = std::function<bool(StateEnum)>;
-    using TransitionHook = std::function<void(StateEnum from, StateEnum to)>;
+    /**
+     * @brief 状态转移钩子函数
+     * @details 在每次状态转移发生时调用，用于调试和监控目的。
+     *
+     * 【适用场景】
+     * - 日志记录：记录状态转移的轨迹和时间点
+     * - 性能统计：统计状态转移次数、频率、耗时
+     * - 监控告警：监控异常状态转移，触发告警
+     * - 审计追踪：记录状态流转历史，满足合规要求
+     *
+     * 【注意事项】
+     * - @b 主要用于调试：此钩子在每次状态转移时同步执行，会影响状态机性能
+     * - @b 不要滥用：严禁在此钩子中执行耗时操作（如IO、网络请求、锁等待）
+     * - @b 异常安全：钩子抛出的异常会被捕获并记录，不影响状态机核心逻辑
+     * - @b 线程安全：确保钩子函数自身是线程安全的
+     *
+     * @param param_1 转移源状态
+     * @param param_2 转移目标状态
+     */
+    using OldState = StateEnum;
+    using NewState = StateEnum;
+    using TransitionHook = std::function<void(OldState, NewState)>;
 
     struct StateActions {
         Action enter;  // 进入该状态时执行
