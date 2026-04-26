@@ -218,8 +218,8 @@ private:
     std::atomic<StateEnum> current_state_;
     mutable std::mutex action_mutex_;  // 保证 Sync/SetState 串行执行
     const std::map<StateEnum, StateActions> state_actions_;  // 不可修改
-    Resolver resolver_;
-    Validator validator_;
+    const Resolver resolver_;
+    const Validator validator_;
     const TransitionHook on_transition_;
     const int hook_timeout_ms_;
 };
