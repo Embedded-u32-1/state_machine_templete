@@ -75,6 +75,35 @@ using Validator = std::function<bool(StateEnum)>;
 
 **作用**：校验目标状态值是否合法（如防止外部直接传入非法枚举值）。可选参数。
 
+### 2.5 状态转移钩子 (TransitionHook)
+
+```cpp
+using OldState = StateEnum;
+using NewState = StateEnum;
+using TransitionHook = std::function<void(OldState, NewState)>;
+```
+
+**作用**：在每次状态转移发生时调用，用于调试和监控目的。
+
+| 适用场景 |
+|----------|
+| 日志记录：记录状态转移的轨迹和时间点 |
+| 性能统计：统计状态转移次数、频率、耗时 |
+| 监控告警：监控异常状态转移，触发告警 |
+| 审计追踪：记录状态流转历史，满足合规要求 |
+
+| 注意事项 |
+|----------|
+| ⚠️ 主要用于调试：此钩子在每次状态转移时同步执行，会影响状态机性能 |
+| ⚠️ 不要滥用：严禁在此钩子中执行耗时操作（如IO、网络请求、锁等待） |
+| ⚠️ 异常安全：钩子抛出的异常会被捕获并记录，不影响状态机核心逻辑 |
+| ⚠️ 线程安全：确保钩子函数自身是线程安全的 |
+
+| 参数 |
+|------|
+| `param_1` : 转移源状态 |
+| `param_2` : 转移目标状态 |
+
 ---
 
 ## 3. API 接口
@@ -87,6 +116,9 @@ using Validator = std::function<bool(StateEnum)>;
 | `Action` | `std::function<void(FsmRef)>` | 状态行为回调 |
 | `Resolver` | `std::function<StateEnum(StateEnum)>` | 状态仲裁函数 |
 | `Validator` | `std::function<bool(StateEnum)>` | 状态校验函数 |
+| `OldState` | `StateEnum` | 状态转移钩子源状态类型 |
+| `NewState` | `StateEnum` | 状态转移钩子目标状态类型 |
+| `TransitionHook` | `std::function<void(OldState, NewState)>` | 状态转移钩子 |
 
 ### 3.2 构造函数
 
@@ -95,13 +127,17 @@ explicit BasicFsm(
     StateEnum initial_state,                          // 初始状态
     std::map<StateEnum, StateActions> state_actions, // 状态行为字典
     Resolver resolver,                                // 仲裁函数【必填】
-    Validator validator = nullptr                      // 校验函数【可选】
+    Validator validator = nullptr,                    // 校验函数【可选】
+    TransitionHook transition_hook = nullptr,         // 状态转移钩子【可选】
+    int hook_timeout_ms = 10                          // 钩子执行超时时间（毫秒）【可选】
 );
 ```
 
 **注意**：
 - `resolver` 不能为空，否则抛出 `std::invalid_argument`
 - `state_actions` 在构造后不可修改
+- `transition_hook` 在构造后不可修改，确保线程安全
+- 钩子执行超时默认 10ms，超过会输出警告信息
 
 ### 3.3 核心方法
 
@@ -331,3 +367,4 @@ private:
 | Resolver 必要性 | 构造函数中必须传入，不能为空 |
 | 递归防护 | `enter`/`exit`/`hold` 中禁止调用 `Sync()`/`SetState()` |
 | 拷贝/移动 | 禁止拷贝与移动，避免状态混乱 |
+| TransitionHook | 可选钩子，用于调试监控，默认超时 10ms |
