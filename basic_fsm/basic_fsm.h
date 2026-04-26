@@ -1,7 +1,9 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <functional>
+#include <iostream>
 #include <map>
 #include <mutex>
 #include <stdexcept>
@@ -37,6 +39,7 @@ class BasicFsm final {
     static_assert(std::is_scoped_enum_v<StateEnum>,
                   "StateEnum must be an enum class (scoped enum)");
 
+private:
     // RAII 递归检测守卫：防止在 enter/exit/hold 回调中调用 Sync/SetState
     struct RecursionGuard {
         // inline static thread_local：C++17 类内直接初始化，每个线程独立存储
@@ -63,6 +66,7 @@ public:
     using Action = std::function<void(FsmRef)>;
     using Resolver = std::function<StateEnum(StateEnum)>;
     using Validator = std::function<bool(StateEnum)>;
+    using TransitionHook = std::function<void(StateEnum from, StateEnum to)>;
 
     struct StateActions {
         Action enter;  // 进入该状态时执行
@@ -76,19 +80,30 @@ public:
      * @param state_actions 状态行为字典：key=状态枚举，value=对应行为
      * @param resolver 状态仲裁函数【根据当前状态，走对应判断分支，决策目标状态】
      * @param validator 可选：状态值合法性校验，默认 nullptr
+     * @param transition_hook 可选：状态转移钩子函数，默认 nullptr
+     * @param hook_timeout_ms 可选：钩子执行超时时间（毫秒），默认 10ms
      * @throws std::invalid_argument resolver 不能为空
+     * @throws std::invalid_argument 初始状态校验失败
      * @note state_actions 在构造后不可修改
+     * @note transition_hook 在构造后不可修改，确保线程安全
      */
     explicit BasicFsm(StateEnum initial_state,
                       std::map<StateEnum, StateActions> state_actions,
                       Resolver resolver,
-                      Validator validator = nullptr)
+                      Validator validator = nullptr,
+                      TransitionHook transition_hook = nullptr,
+                      int hook_timeout_ms = 10)
         : current_state_(initial_state),
           state_actions_(std::move(state_actions)),
           resolver_(std::move(resolver)),
-          validator_(std::move(validator)) {
+          validator_(std::move(validator)),
+          on_transition_(std::move(transition_hook)),
+          hook_timeout_ms_(hook_timeout_ms) {
         if (!resolver_) {
             throw std::invalid_argument("resolver cannot be null");
+        }
+        if (validator_ && !validator_(initial_state)) {
+            throw std::invalid_argument("Invalid initial state");
         }
     }
 
@@ -105,12 +120,15 @@ public:
      * @note 会执行：仲裁 -> 状态切换 或 状态保持
      * @note 内部加锁保证线程安全，锁粒度覆盖整个仲裁+切换过程
      * @note 防止递归：若在 enter/exit/hold 回调中调用 Sync()，会抛出异常
+     * @throws std::runtime_error 状态转移失败时抛出
      */
     void Sync() {
         RecursionGuard recursion_guard;                  // 1. 防递归
         std::lock_guard<std::mutex> lock(action_mutex_);  // 2. 串行
         StateEnum desired = resolver_(current_state_.load());
-        SetStateInternal(desired);
+        if (!SetStateInternal(desired)) {
+            throw std::runtime_error("Invalid state transition in Sync()");
+        }
     }
 
     /**
@@ -119,11 +137,14 @@ public:
      * @note 如果有 validator，则先校验合法性
      * @note 内部加锁保证线程安全，锁粒度覆盖整个校验+切换过程
      * @note 防止递归：若在 enter/exit/hold 回调中调用 SetState()，会抛出异常
+     * @throws std::runtime_error 状态转移失败时抛出
      */
     void SetState(StateEnum target) {
         RecursionGuard recursion_guard;                  // 1. 防递归
         std::lock_guard<std::mutex> lock(action_mutex_);  // 2. 串行
-        SetStateInternal(target);
+        if (!SetStateInternal(target)) {
+            throw std::runtime_error("Invalid state transition in SetState()");
+        }
     }
 
     /**
@@ -136,21 +157,40 @@ public:
     }
 
 private:
+    void CallTransitionHookWithTimeout(StateEnum from, StateEnum to) {
+        if (!on_transition_) {
+            return;
+        }
+        
+        auto start = std::chrono::steady_clock::now();
+        on_transition_(from, to);
+        auto end = std::chrono::steady_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+        
+        if (duration > hook_timeout_ms_) {
+            std::cerr << "[WARNING] Transition hook execution time (" << duration 
+                      << "ms) exceeds timeout threshold (" << hook_timeout_ms_ << "ms)" << std::endl;
+        }
+    }
+
     /**
      * @brief 设置状态的核心逻辑（不带锁）
      * @note 由 Sync/SetState 在持有锁的前提下调用
      * @note 内部自动判断：
      *       - 目标 != 当前 → exit + enter
      *       - 目标 == 当前 → 执行 hold
+     * @return true 表示状态设置成功，false 表示校验失败
      */
-    inline void SetStateInternal(StateEnum target) {
+    inline bool SetStateInternal(StateEnum target) {
         // 有校验函数 → 校验；没有则跳过
         if (validator_ && !validator_(target)) {
-            return;
+            return false;
         }
 
         StateEnum current = current_state_.load();
         if (target != current) {
+            CallTransitionHookWithTimeout(current, target);
+
             // 退出旧状态
             auto it_old = state_actions_.find(current);
             if (it_old != state_actions_.end() && it_old->second.exit) {
@@ -171,6 +211,7 @@ private:
                 it_curr->second.hold(*this);
             }
         }
+        return true;
     }
 
 private:
@@ -179,5 +220,7 @@ private:
     const std::map<StateEnum, StateActions> state_actions_;  // 不可修改
     Resolver resolver_;
     Validator validator_;
+    const TransitionHook on_transition_;
+    const int hook_timeout_ms_;
 };
 
