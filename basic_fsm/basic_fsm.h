@@ -10,52 +10,40 @@
 #include <type_traits>
 
 /**
- * @brief 通用基础状态机（普通状态机）
- * @note 设计思想：
- *       1. 世界变化时调用 Sync()，与世界状态同步
- *       2. Sync() 内部通过 resolver 仲裁目标状态
- *       3. 状态变化 → 执行 exit + enter
- *       4. 状态不变 → 执行 hold
- *       5. 手动强制设置状态使用 SetState()
- *       6. 构造时必须传入初始状态 + 仲裁函数 resolver
- *       7. 校验函数 validator 为可选，用于防止非法数值强转状态枚举
- *
- * @note 使用方式：
- *       1. 定义状态枚举（必须是 enum class）
- *       2. 构造 BasicFsm，传入初始状态、状态行为、仲裁函数
- *       3. 世界变化时调用 Sync()
- *       4. 需要强制跳转状态时调用 SetState()
- *
- * @note 线程安全：
- *       - 内部使用 mutex 保证 Sync/SetState 串行执行
- *       - CurrentState() 读取是线程安全的（atomic）
- *       - resolver/validator 回调如果涉及共享数据，用户需自行保证线程安全
- *       - 递归检测：若在 enter/exit/hold 回调中调用 Sync/SetState，会抛出异常
+ * @brief 通用基础状态机
+ * @note 设计：
+ *   1. 核心特性：
+ *      - 模板类：通过 std::is_scoped_enum_v，编译时期 确保 传入类型安全
+ *      - 仲裁式状态机：通过 resolver 函数决定下一个目标状态
+ *      - 状态行为：每个状态可注册 enter/exit/hold 三种回调
+ *   2. 状态转移：
+ *      - Sync()：仲裁式同步，与外部世界状态对齐
+ *      - SetState()：强制设置状态（用于 teleport/reset）
+ *      - 状态保持时触发 hold 回调
+ *   3. 线程安全：
+ *      - mutex 保证 Sync/SetState 串行执行
+ *      - atomic 存储当前状态，保证读取原子性
+ *      - 递归检测：若在 enter/exit/hold 回调中调用 Sync/SetState，抛异常
+ *   4. 禁止拷贝/移动：避免多实例导致状态混乱
  */
 
 template <typename StateEnum>
 class BasicFsm final {
-    // static_assert 检查 StateEnum 必须是 enum class（强类型枚举）
     static_assert(std::is_scoped_enum_v<StateEnum>,
                   "StateEnum must be an enum class (scoped enum)");
 
 private:
-    // RAII 递归检测守卫：防止在 enter/exit/hold 回调中调用 Sync/SetState
     struct RecursionGuard {
-        // inline static thread_local：C++17 类内直接初始化，每个线程独立存储
         // - inline: 允许类内初始化（C++17）
         // - static: 类内共享
         // - thread_local: 每个线程独立一份
-        // 原理：同一线程内递归构造会检测到 s_in_use_ == true，从而抛出异常
         inline static thread_local bool s_in_use_ = false;
-
         RecursionGuard() {
             if (s_in_use_) {
                 throw std::runtime_error("Recursive state transition detected");
             }
             s_in_use_ = true;
         }
-
         ~RecursionGuard() {
             s_in_use_ = false;
         }
@@ -67,23 +55,12 @@ public:
     using Resolver = std::function<StateEnum(StateEnum)>;
     using Validator = std::function<bool(StateEnum)>;
     /**
-     * @brief 状态转移钩子函数
-     * @details 在每次状态转移发生时调用，用于调试和监控目的。
-     *
+     * @brief 状态转移钩子函数: 用于调试。
      * 【适用场景】
-     * - 日志记录：记录状态转移的轨迹和时间点
-     * - 性能统计：统计状态转移次数、频率、耗时
-     * - 监控告警：监控异常状态转移，触发告警
-     * - 审计追踪：记录状态流转历史，满足合规要求
-     *
+     * - @b 日志记录：状态转移轨迹
+     * - @b 性能统计：统计状态转移次数、频率；
      * 【注意事项】
-     * - @b 主要用于调试：此钩子在每次状态转移时同步执行，会影响状态机性能
-     * - @b 不要滥用：严禁在此钩子中执行耗时操作（如IO、网络请求、锁等待）
-     * - @b 异常安全：钩子抛出的异常会被捕获并记录，不影响状态机核心逻辑
-     * - @b 线程安全：确保钩子函数自身是线程安全的
-     *
-     * @param param_1 转移源状态
-     * @param param_2 转移目标状态
+     * - @b 不要滥用：严禁在此钩子中执行耗时操作（如IO、网络请求、锁等待），会影响状态机性能
      */
     using OldState = StateEnum;
     using NewState = StateEnum;
@@ -98,15 +75,11 @@ public:
     /**
      * @brief 构造函数
      * @param initial_state 初始状态
-     * @param state_actions 状态行为字典：key=状态枚举，value=对应行为
-     * @param resolver 状态仲裁函数【根据当前状态，走对应判断分支，决策目标状态】
-     * @param validator 可选：状态值合法性校验，默认 nullptr
-     * @param transition_hook 可选：状态转移钩子函数，默认 nullptr
-     * @param hook_timeout_ms 可选：钩子执行超时时间（毫秒），默认 10ms
-     * @throws std::invalid_argument resolver 不能为空
-     * @throws std::invalid_argument 初始状态校验失败
-     * @note state_actions 在构造后不可修改
-     * @note transition_hook 在构造后不可修改，确保线程安全
+     * @param state_actions 状态行为字典
+     * @param resolver 仲裁函数
+     * @param validator 可选校验
+     * @param transition_hook 可选转移钩子
+     * @param hook_timeout_ms 钩子超时(ms)，默认10
      */
     explicit BasicFsm(StateEnum initial_state,
                       std::map<StateEnum, StateActions> state_actions,
@@ -138,10 +111,7 @@ public:
 
     /**
      * @brief 与世界状态同步（核心调用接口）
-     * @note 会执行：仲裁 -> 状态切换 或 状态保持
-     * @note 内部加锁保证线程安全，锁粒度覆盖整个仲裁+切换过程
-     * @note 防止递归：若在 enter/exit/hold 回调中调用 Sync()，会抛出异常
-     * @throws std::runtime_error 状态转移失败时抛出
+     * @note    仲裁式--状态 切换 / 保持
      */
     void Sync() {
         RecursionGuard recursion_guard;                  // 1. 防递归
@@ -152,14 +122,7 @@ public:
         }
     }
 
-    /**
-     * @brief 强制设置状态（teleport / reset 使用）
-     * @param target 目标状态
-     * @note 如果有 validator，则先校验合法性
-     * @note 内部加锁保证线程安全，锁粒度覆盖整个校验+切换过程
-     * @note 防止递归：若在 enter/exit/hold 回调中调用 SetState()，会抛出异常
-     * @throws std::runtime_error 状态转移失败时抛出
-     */
+    /** @brief 强制设置状态（teleport / reset 使用） */
     void SetState(StateEnum target) {
         RecursionGuard recursion_guard;                  // 1. 防递归
         std::lock_guard<std::mutex> lock(action_mutex_);  // 2. 串行
@@ -168,11 +131,7 @@ public:
         }
     }
 
-    /**
-     * @brief 获取当前状态
-     * @return StateEnum 当前状态枚举值
-     * @note 线程安全的原子读取
-     */
+    /** @brief 获取当前状态（原子读） */
     StateEnum CurrentState() const {
         return current_state_.load();
     }
@@ -196,10 +155,6 @@ private:
 
     /**
      * @brief 设置状态的核心逻辑（不带锁）
-     * @note 由 Sync/SetState 在持有锁的前提下调用
-     * @note 内部自动判断：
-     *       - 目标 != 当前 → exit + enter
-     *       - 目标 == 当前 → 执行 hold
      * @return true 表示状态设置成功，false 表示校验失败
      */
     inline bool SetStateInternal(StateEnum target) {
@@ -237,8 +192,8 @@ private:
 
 private:
     std::atomic<StateEnum> current_state_;
-    mutable std::mutex action_mutex_;  // 保证 Sync/SetState 串行执行
-    const std::map<StateEnum, StateActions> state_actions_;  // 不可修改
+    std::mutex action_mutex_;
+    const std::map<StateEnum, StateActions> state_actions_;
     const Resolver resolver_;
     const Validator validator_;
     const TransitionHook on_transition_;
