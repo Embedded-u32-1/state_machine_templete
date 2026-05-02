@@ -20,13 +20,13 @@ public:
      * @brief 状态+事件组合键，作为事件规则 map 的 key
      */
     struct Key {
-        StateEnum state;
-        EventEnum event;
+        StateEnum state_;
+        EventEnum event_;
 
         bool operator<(const Key& other) const {
-            if (state != other.state)
-                return state < other.state;
-            return event < other.event;
+            if (state_ != other.state_)
+                return state_ < other.state_;
+            return event_ < other.event_;
         }
     };
 
@@ -55,7 +55,7 @@ public:
      * @brief 批量注册【事件规则表】，内部拷贝存储
      * @param rules 外部 map: {Key} → Action
      */
-    void register_rules(const std::map<Key, Action>& rules) {
+    void RegisterRules(const std::map<Key, Action>& rules) {
         rules_ = rules;
     }
 
@@ -63,7 +63,7 @@ public:
      * @brief 批量注册【状态生命周期表】，内部拷贝存储
      * @param lifecycles 外部 map: StateEnum → Lifecycle
      */
-    void register_lifecycles(const std::map<StateEnum, Lifecycle>& lifecycles) {
+    void RegisterLifecycles(const std::map<StateEnum, Lifecycle>& lifecycles) {
         lifecycles_ = lifecycles;
     }
 
@@ -71,7 +71,7 @@ public:
      * @brief 派发事件
      * @note 查找匹配 Key，执行对应 Action
      */
-    void dispatch(EventEnum event) {
+    void Dispatch(EventEnum event) {
         auto key = Key{current_state_, event};
         auto it = rules_.find(key);
 
@@ -85,7 +85,7 @@ public:
      * @param next_state 目标状态
      * @note 与当前状态相同时，不触发任何生命周期
      */
-    void transition(StateEnum next_state) {
+    void Transition(StateEnum next_state) {
         if (current_state_ == next_state)
             return;
 
@@ -108,14 +108,14 @@ public:
     /**
      * @brief 获取当前状态
      */
-    StateEnum state() const {
+    StateEnum CurrentState() const {
         return current_state_;
     }
 
 private:
-    StateEnum                   current_state_;
-    std::map<Key, Action>       rules_;       // 事件规则（内部存储）
-    std::map<StateEnum, Lifecycle> lifecycles_; // 生命周期（内部存储）
+    StateEnum                           current_state_;
+    std::map<Key, Action>              rules_;           // 事件规则（内部存储）
+    std::map<StateEnum, Lifecycle>      lifecycles_;      // 生命周期（内部存储）
 };
 
 /*
@@ -127,10 +127,10 @@ using Fsm = EventFsm<State, Event>;
 std::map<Fsm::Key, Fsm::Action> rules = {
     {{State::idle, Event::start}, [this](Fsm& fsm) {
         // do something
-        fsm.transition(State::running);
+        fsm.Transition(State::running);
     }},
     {{State::running, Event::stop}, [this](Fsm& fsm) {
-        fsm.transition(State::idle);
+        fsm.Transition(State::idle);
     }}
 };
 
@@ -140,7 +140,7 @@ std::map<State, Fsm::Lifecycle> lifecycles = {
     {State::fault,   {[](Fsm&){}, [](Fsm&){}}}
 };
 
-fsm_.register_rules(rules);
-fsm_.register_lifecycles(lifecycles);
+fsm_.RegisterRules(rules);
+fsm_.RegisterLifecycles(lifecycles);
 ===============================================================================
 */
