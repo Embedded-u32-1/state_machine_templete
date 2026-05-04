@@ -1,11 +1,16 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <functional>
+#include <iostream>
 #include <stdexcept>
 #include <map>
+#include <mutex>
 #include <type_traits>
 #include <vector>
+
+#include "thread_local.h"
 
 /**
  * @brief 事件驱动状态机（Header-Only）
@@ -20,6 +25,28 @@
  */
 template <typename StateEnum, typename EventEnum>
 class EventFsm final {
+    static_assert(std::is_scoped_enum_v<StateEnum>,
+                  "StateEnum must be an enum class (scoped enum)");
+    static_assert(std::is_scoped_enum_v<EventEnum>,
+                  "EventEnum must be an enum class (scoped enum)");
+
+private:
+    struct RecursionGuard {
+        // - inline: 允许类内初始化（C++17）
+        // - static: 类内共享
+        // - thread_local: 每个线程独立一份
+        inline static thread_local bool s_in_use_ = false;
+        RecursionGuard() {
+            if (s_in_use_) {
+                throw std::runtime_error("Recursive state transition detected");
+            }
+            s_in_use_ = true;
+        }
+        ~RecursionGuard() {
+            s_in_use_ = false;
+        }
+    };
+
 public:
     using SelfType = EventFsm&;
     using Action   = std::function<void(SelfType)>;
@@ -29,6 +56,23 @@ public:
      * @note 禁止依赖事件的入队顺序或索引位置（同一批次事件视为同一时刻扰动）
      */
     using Resolver = std::function<StateEnum(StateEnum, const std::vector<EventEnum>&)>;
+
+    /**
+     * @brief 状态校验器：校验目标状态是否合法
+     */
+    using Validator = std::function<bool(StateEnum)>;
+
+    /**
+     * @brief 状态转移钩子函数: 用于调试。
+     * 【适用场景】
+     * - @b 日志记录：状态转移轨迹
+     * - @b 性能统计：统计状态转移次数、频率；
+     * 【注意事项】
+     * - @b 不要滥用：严禁在此钩子中执行耗时操作（如IO、网络请求、锁等待），会影响状态机性能
+     */
+    using OldState = StateEnum;
+    using NewState = StateEnum;
+    using TransitionHook = std::function<void(OldState, NewState)>;
 
     /**
      * @brief 状态+事件组合键，作为事件规则 map 的 key
@@ -55,21 +99,33 @@ public:
 
     /**
      * @brief 构造函数，构造结束即固定，不允许后续修改
-     * @param init_state    初始状态
-     * @param rules         事件规则表
-     * @param lifecycles    状态生命周期表
-     * @param resolver      仲裁函数
+     * @param init_state        初始状态
+     * @param rules             事件规则表
+     * @param lifecycles        状态生命周期表
+     * @param resolver          仲裁函数
+     * @param validator         可选校验
+     * @param transition_hook   可选转移钩子
+     * @param hook_timeout_ms   钩子超时(ms)，默认10
      */
     explicit EventFsm(StateEnum init_state,
                       std::map<Key, Action> rules,
                       std::map<StateEnum, Lifecycle> lifecycles,
-                      Resolver resolver)
+                      Resolver resolver,
+                      Validator validator = nullptr,
+                      TransitionHook transition_hook = nullptr,
+                      int hook_timeout_ms = 10)
         : current_state_(init_state),
           rules_(std::move(rules)),
           lifecycles_(std::move(lifecycles)),
-          resolver_(std::move(resolver)) {
+          resolver_(std::move(resolver)),
+          validator_(std::move(validator)),
+          on_transition_(std::move(transition_hook)),
+          hook_timeout_ms_(hook_timeout_ms) {
         if (!resolver_) {
             throw std::invalid_argument("resolver cannot be null");
+        }
+        if (validator_ && !validator_(init_state)) {
+            throw std::invalid_argument("Invalid initial state");
         }
     }
 
@@ -84,7 +140,7 @@ public:
      * @param event 待处理事件
      */
     void Post(EventEnum event) {
-        pending_events_.push_back(event);
+        pending_events_.Get().push_back(event);
     }
 
     /**
@@ -95,8 +151,12 @@ public:
      *       3. 状态保持：取出全部事件 → 按序匹配 rules_ → 合法事件执行 Action，非法事件丢弃
      */
     void Sync() {
-        StateEnum target = resolver_(current_state_.load(), pending_events_);
-        SetStateInternal(target);
+        RecursionGuard recursion_guard;                  // 1. 防递归
+        std::lock_guard<std::mutex> lock(action_mutex_);  // 2. 串行
+        StateEnum target = resolver_(current_state_.load(), pending_events_.Get());
+        if (!SetStateInternal(target)) {
+            throw std::runtime_error("Invalid state transition in Sync()");
+        }
     }
 
     /**
@@ -106,7 +166,11 @@ public:
      * @note 状态切换时，pending_events_ 会被清空（遵循"状态切换时事件全部丢弃"原则）
      */
     void SetState(StateEnum state) {
-        SetStateInternal(state);
+        RecursionGuard recursion_guard;                  // 1. 防递归
+        std::lock_guard<std::mutex> lock(action_mutex_);  // 2. 串行
+        if (!SetStateInternal(state)) {
+            throw std::runtime_error("Invalid state transition in SetState()");
+        }
     }
 
     /**
@@ -117,18 +181,42 @@ public:
     }
 
 private:
+    void CallTransitionHookWithTimeout(StateEnum from, StateEnum to) {
+        if (!on_transition_) {
+            return;
+        }
+        
+        auto start = std::chrono::steady_clock::now();
+        on_transition_(from, to);
+        auto end = std::chrono::steady_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+        
+        if (duration > hook_timeout_ms_) {
+            std::cerr << "[WARNING] Transition hook execution time (" << duration 
+                      << "ms) exceeds timeout threshold (" << hook_timeout_ms_ << "ms)" << std::endl;
+        }
+    }
+
     /**
      * @brief 设置状态的核心逻辑（不带锁）
      * @param target 目标状态
+     * @return true 表示状态设置成功，false 表示校验失败
      * @note 状态切换：清空事件 → exit(old) → 原子切换 → enter(new)
      * @note 状态保持：取出事件 → 匹配 rules_ → 合法事件执行 Action，非法事件丢弃
      */
-    inline void SetStateInternal(StateEnum target) {
+    inline bool SetStateInternal(StateEnum target) {
+        // 有校验函数 → 校验；没有则跳过
+        if (validator_ && !validator_(target)) {
+            return false;
+        }
+
         StateEnum current = current_state_.load();
 
         if (target != current) {
+            CallTransitionHookWithTimeout(current, target);
+
             // 状态切换：直接清空整批事件，不执行任何事件回调
-            pending_events_.clear();
+            pending_events_.Get().clear();
 
             // 退出旧状态
             if (auto it = lifecycles_.find(current);
@@ -146,8 +234,8 @@ private:
             }
         } else {
             // 状态保持：取出事件，做「状态+事件」合法性过滤，合法事件全部执行
-            auto events = std::move(pending_events_);
-            pending_events_.clear();
+            auto events = std::move(pending_events_.Get());
+            pending_events_.Get().clear();
 
             for (const auto& event : events) {
                 auto key = Key{target, event};
@@ -158,13 +246,18 @@ private:
                 // 非法事件（当前状态下无对应规则）：静默丢弃
             }
         }
+        return true;
     }
 
 private:
     std::atomic<StateEnum>         current_state_;     // 当前状态（原子）
-    std::vector<EventEnum>         pending_events_;     // 待处理事件队列
+    ThreadLocal<std::vector<EventEnum>> pending_events_;     // 待处理事件队列（线程本地）
+    std::mutex                     action_mutex_;       // 并发-串行化锁
 
     const std::map<Key, Action>          rules_;              // 状态-事件规则
     const std::map<StateEnum, Lifecycle> lifecycles_;         // 状态生命周期
     const Resolver                       resolver_;           // 仲裁器
+    const Validator                      validator_;          // 状态校验器
+    const TransitionHook                 on_transition_;      // 状态转移钩子
+    const int                            hook_timeout_ms_;    // 钩子超时阈值(ms)
 };
