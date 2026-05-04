@@ -22,13 +22,21 @@ Head-Only 状态机模板，提供两种状态机实现：
 
 ## 2. 事件型状态机 ([event_fsm/event_fsm.h](event_fsm/event_fsm.h))
 
-> ⚠️ **代码未完善，仅作简单介绍**
-
 通过事件触发状态转移，按键值 `(state, event)` 查找规则。
+
+**核心特性**：
+- **世界快照**：Sync 时 resolver 拿到的是当前全部 pending 事件的完整快照，而非逐条处理
+- **同一批次 = 同一时刻**：所有投递的事件视为同一时刻的扰动，resolver 需对此免疫
+- **批量投递模式**：
+  - **状态切换时**：整批事件直接丢弃，不执行任何 Action（取舍：放弃瞬时响应，换取一致性）
+  - **状态保持时**：事件不去重【不分辨重复意图】；合法事件执行，非法事件丢弃
+- **串行单发模式**：每次 Post 后立即 Sync，事件逐条仲裁
+- **线程安全**：mutex 串行化用户回调 + thread_local 递归检测（触发时抛异常）+ 事件队列【动态实例的普通成员变量】线程独立副本
 
 **适用场景**：中等复杂场景，性价比高
 
 ## 使用示例
 
 见各个 FSM 文件内的注释示例：
-- [basic_fsm 使用示例](basic_fsm/basic_fsm_usage.md)
+- [basic_fsm 使用示例](basic_fsm/doc/basic_fsm_usage.md)
+- [event_fsm 使用示例](event_fsm/doc/event_fsm_usage.md)
