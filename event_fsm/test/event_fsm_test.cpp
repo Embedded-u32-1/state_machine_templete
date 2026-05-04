@@ -1,25 +1,11 @@
 #include "../event_fsm.h"
 #include <iostream>
 #include <map>
-#ifdef _WIN32
-#include <windows.h>
-#endif
 
 // ==================== 状态和事件定义 ====================
 enum class PlayerState { kStopped, kPlaying, kPaused };
 
 enum class PlayerEvent { kPlay, kPause, kStop };
-
-namespace {
-
-void ConfigureConsoleUtf8() {
-#ifdef _WIN32
-    SetConsoleOutputCP(CP_UTF8);
-    SetConsoleCP(CP_UTF8);
-#endif
-}
-
-}  // namespace
 
 // ==================== 测试类：播放器 ====================
 class Player {
@@ -172,7 +158,6 @@ private:
 
 // ==================== 主函数 ====================
 int main() {
-    ConfigureConsoleUtf8();
     std::cout << "===== EventFsm 简单测试 =====\n\n";
 
     Player player;
