@@ -43,8 +43,7 @@ public:
         if (it == Data_.end()) {
             // 当线程本地存储不存在时，使用 default_value_ 或 T{} 初始化
             if (default_value_.has_value()) {
-                // 使用 ConstType 构造，确保存储类型不可修改
-                auto result = Data_.emplace(this, ConstType(default_value_->value()));
+                auto result = Data_.emplace(this, default_value_.value());
                 return result.first->second;
             } else {
                 auto result = Data_.emplace(this, T{});
