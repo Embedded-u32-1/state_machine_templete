@@ -32,19 +32,25 @@ class EventFsm final {
 
 private:
     struct RecursionGuard {
-        // - inline: 允许类内初始化（C++17）
-        // - static: 类内共享
-        // - thread_local: 每个线程独立一份
-        inline static thread_local bool s_in_use_ = false;
-        RecursionGuard() {
-            if (s_in_use_) {
-                throw std::runtime_error("Recursive state transition detected");
+        bool& flag_;
+
+        explicit RecursionGuard(bool& flag) : flag_(flag) {
+            if (flag_) {
+                throw std::runtime_error(
+                    "Recursive state transition detected");
             }
-            s_in_use_ = true;
+            flag_ = true;
         }
+
         ~RecursionGuard() {
-            s_in_use_ = false;
+            flag_ = false;
         }
+
+        // 禁用拷贝和移动
+        RecursionGuard(const RecursionGuard&) = delete;
+        RecursionGuard& operator=(const RecursionGuard&) = delete;
+        RecursionGuard(RecursionGuard&&) = delete;
+        RecursionGuard& operator=(RecursionGuard&&) = delete;
     };
 
 public:
@@ -151,7 +157,7 @@ public:
      *       3. 状态保持：取出全部事件 → 按序匹配 rules_ → 合法事件执行 Action，非法事件丢弃
      */
     void Sync() {
-        RecursionGuard recursion_guard;                  // 1. 防递归
+        RecursionGuard recursion_guard(recursion_in_use_.Get());  // 1. 防递归
         std::lock_guard<std::mutex> lock(action_mutex_);  // 2. 串行
         StateEnum target = resolver_(current_state_.load(), pending_events_.Get());
         if (!SetStateInternal(target)) {
@@ -166,7 +172,7 @@ public:
      * @note 状态切换时，pending_events_ 会被清空（遵循"状态切换时事件全部丢弃"原则）
      */
     void SetState(StateEnum state) {
-        RecursionGuard recursion_guard;                  // 1. 防递归
+        RecursionGuard recursion_guard(recursion_in_use_.Get());  // 1. 防递归
         std::lock_guard<std::mutex> lock(action_mutex_);  // 2. 串行
         if (!SetStateInternal(state)) {
             throw std::runtime_error("Invalid state transition in SetState()");
@@ -251,6 +257,7 @@ private:
 
 private:
     std::atomic<StateEnum>         current_state_;     // 当前状态（原子）
+    ThreadLocal<bool> recursion_in_use_{false};  // 递归检测存储（实例级）
     ThreadLocal<std::vector<EventEnum>> pending_events_;     // 待处理事件队列（线程本地）
     std::mutex                     action_mutex_;       // 并发-串行化锁
 
