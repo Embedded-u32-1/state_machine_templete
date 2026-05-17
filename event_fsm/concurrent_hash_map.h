@@ -178,6 +178,10 @@ public:
     }
 
 private:
+    struct Bucket {
+        std::map<KeyType, T> data;
+        mutable std::shared_mutex mutex;
+    };
 
     /**
      * @brief 64 位整数哈希（MurmurHash 风格最终化函数）
@@ -213,9 +217,5 @@ private:
     }
 
 private:
-    struct Bucket {
-        std::map<KeyType, T> data;
-        mutable std::shared_mutex mutex;
-    };
     std::array<Bucket, BucketCount> buckets_;
 };
