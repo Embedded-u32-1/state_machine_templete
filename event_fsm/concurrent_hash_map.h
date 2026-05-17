@@ -41,64 +41,6 @@ public:
     // ─── 写操作 ───
 
     /**
-     * @brief 插入或替换
-     * @param key   键
-     * @param value 值
-     * @return true 表示新增，false 表示已存在并执行替换
-     */
-    bool Insert(KeyType key, const T& value) {
-        Bucket& bucket = GetBucket(key);
-        std::unique_lock<std::shared_mutex> lock(bucket.mutex);
-        auto [it, inserted] = bucket.data.emplace(key, value);
-        if (!inserted) {
-            it->second = value;  // 已存在则替换
-        }
-        return inserted;
-    }
-
-    /**
-     * @brief 插入或替换（移动语义）
-     * @param key   键
-     * @param value 值
-     * @return true 表示新增，false 表示已存在并执行替换
-     */
-    bool Insert(KeyType key, T&& value) {
-        Bucket& bucket = GetBucket(key);
-        std::unique_lock<std::shared_mutex> lock(bucket.mutex);
-        auto [it, inserted] = bucket.data.emplace(key, std::move(value));
-        if (!inserted) {
-            it->second = std::move(value);  // 已存在则替换
-        }
-        return inserted;
-    }
-
-    /**
-     * @brief 仅在 Key 不存在时插入
-     * @param key   键
-     * @param value 值
-     * @return true 表示插入成功，false 表示已存在未修改
-     */
-    bool TryInsert(KeyType key, const T& value) {
-        Bucket& bucket = GetBucket(key);
-        std::unique_lock<std::shared_mutex> lock(bucket.mutex);
-        auto [it, inserted] = bucket.data.emplace(key, value);
-        return inserted;
-    }
-
-    /**
-     * @brief 仅在 Key 不存在时插入（移动语义）
-     * @param key   键
-     * @param value 值
-     * @return true 表示插入成功，false 表示已存在未修改
-     */
-    bool TryInsert(KeyType key, T&& value) {
-        Bucket& bucket = GetBucket(key);
-        std::unique_lock<std::shared_mutex> lock(bucket.mutex);
-        auto [it, inserted] = bucket.data.emplace(key, std::move(value));
-        return inserted;
-    }
-
-    /**
      * @brief 原地构造插入
      * @tparam Args 构造参数类型
      * @param key   键
@@ -144,16 +86,19 @@ public:
     // ─── 读操作 ───
 
     /**
-     * @brief 查找并返回值
+     * @brief 查找并返回指向原节点的指针
      * @param key 键
-     * @return 找到返回值的拷贝，否则返回 std::nullopt
+     * @return 找到返回指向桶内 map 节点的指针，否则返回 std::nullopt
+     * @note 返回的指针，在桶被如下操作之后无效：
+     *          - Erase 这个key的节点；
+     *          - 重新插入同一个 key（旧节点被销毁，新节点创建）;
      */
-    std::optional<T> Find(KeyType key) const {
-        const Bucket& bucket = GetBucket(key);
+    std::optional<std::pair<const KeyType, T>*> Find(KeyType key) {
+        Bucket& bucket = GetBucket(key);
         std::shared_lock<std::shared_mutex> lock(bucket.mutex);
         auto it = bucket.data.find(key);
         if (it != bucket.data.end()) {
-            return it->second;
+            return &(*it);      // * 迭代器重载运算符, 拿到实际节点 类型：std::pair<const KeyType, T>
         }
         return std::nullopt;
     }
@@ -233,12 +178,6 @@ public:
     }
 
 private:
-    struct Bucket {
-        std::map<KeyType, T> data;
-        mutable std::shared_mutex mutex;
-    };
-
-    std::array<Bucket, BucketCount> buckets_;
 
     /**
      * @brief 64 位整数哈希（MurmurHash 风格最终化函数）
@@ -272,4 +211,11 @@ private:
     const Bucket& GetBucket(KeyType key) const {
         return buckets_[GetBucketIndex(key)];
     }
+
+private:
+    struct Bucket {
+        std::map<KeyType, T> data;
+        mutable std::shared_mutex mutex;
+    };
+    std::array<Bucket, BucketCount> buckets_;
 };
