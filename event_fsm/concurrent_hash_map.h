@@ -103,17 +103,6 @@ public:
         return std::nullopt;
     }
 
-    /**
-     * @brief 判断是否包含指定 Key
-     * @param key 键
-     * @return true 表示存在
-     */
-    bool Contains(KeyType key) const {
-        const Bucket& bucket = GetBucket(key);
-        std::shared_lock<std::shared_mutex> lock(bucket.mutex);
-        return bucket.data.find(key) != bucket.data.end();
-    }
-
     // ─── 批量/统计 ───
 
     /**
