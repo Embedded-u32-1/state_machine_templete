@@ -18,7 +18,7 @@
  *       - 桶内使用 std::map，避免 rehash 和迭代器失效
  *       - 无迭代器暴露，批量操作返回 snapshot
  */
-template <typename T, size_t BucketCount = 64>
+template <typename T, size_t BucketCount = 16>
 class ConcurrentHashMap final {
     // 编译期断言：BucketCount 必须是 2 的幂次（支持快速位掩码取模）
     static_assert((BucketCount & (BucketCount - 1)) == 0,
@@ -45,10 +45,11 @@ public:
      * @tparam Args 构造参数类型
      * @param key   键
      * @param args  构造 Value 的参数
-     * @return true 表示新增，false 表示已存在并原地替换
+     * @return pair.first  指向桶内节点的指针（与 Find 返回的同类型）
+     *         pair.second true 表示新增，false 表示已存在并原地替换
      */
     template <typename... Args>
-    bool Emplace(KeyType key, Args&&... args) {
+    std::pair<std::pair<const KeyType, T>*, bool> Emplace(KeyType key, Args&&... args) {
         Bucket& bucket = GetBucket(key);
         std::unique_lock<std::shared_mutex> lock(bucket.mutex);
         auto [it, inserted] = bucket.data.emplace(
@@ -58,7 +59,7 @@ public:
         if (!inserted) {
             it->second = T(std::forward<Args>(args)...);  // 原地替换
         }
-        return inserted;
+        return {&(*it), inserted};
     }
 
     /**
@@ -98,7 +99,7 @@ public:
         std::shared_lock<std::shared_mutex> lock(bucket.mutex);
         auto it = bucket.data.find(key);
         if (it != bucket.data.end()) {
-            return &(*it);      // * 迭代器重载运算符, 拿到实际节点 类型：std::pair<const KeyType, T>
+            return &(*it);      // * 迭代器重载运算符, 拿到实际节点, 类型：std::pair<const KeyType, T>
         }
         return std::nullopt;
     }

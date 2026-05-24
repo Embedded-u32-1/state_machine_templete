@@ -1,9 +1,11 @@
 #pragma once
 
 #include <optional>
+#include <thread>
 #include <type_traits>
-#include <unordered_map>
 #include <utility>
+
+#include "concurrent_hash_map.h"
 
 template <typename T>
 class ThreadLocal
@@ -38,31 +40,34 @@ public:
     explicit ThreadLocal(T&& value)
         : default_value_(std::in_place, std::move(value)) {}
 
-    T &Get() {
-        auto it = Data_.find(this);
-        if (it == Data_.end()) {
+    T& Get() {
+        uint64_t tid = GetTid();
+        auto opt = Data_.Find(tid);
+        if (opt.has_value()) {
+            // 该线程副本已经存在
+            return opt.value()->second;
+        } else {
             // 当线程本地存储不存在时，使用 default_value_ 或 T{} 初始化
             if (default_value_.has_value()) {
-                auto result = Data_.emplace(this, default_value_.value());
-                return result.first->second;
+                auto [ptr, inserted] = Data_.Emplace(tid, default_value_.value());
+                (void)inserted;
+                return ptr->second;
             } else {
-                auto result = Data_.emplace(this, T{});
-                return result.first->second;
+                auto [ptr, inserted] = Data_.Emplace(tid, T{});
+                (void)inserted;
+                return ptr->second;
             }
-        } else {
-            // 该线程副本已经 存在
-            return it->second;
         }
     }
 
     void Set(const T &value)
     {
-        Data_[this] = value;
+        Data_.Emplace(GetTid(), value);
     }
 
     void Set(T &&value)
     {
-        Data_[this] = std::move(value);
+        Data_.Emplace(GetTid(), std::move(value));
     }
 
 private:
@@ -70,6 +75,10 @@ private:
     using ConstType = const T;
     // 默认值：仅初始化赋值，线程间共享（const 保证）
     const std::optional<ConstType> default_value_;
-    // 线程本地存储：每个线程独立一份 map，key 为 this 指针，value 为 T
-    inline static thread_local std::unordered_map<const ThreadLocal<T> *, T> Data_;
+    // 线程本地存储：key 固定为【线程ID uint64_t】；value 为 T；
+    ConcurrentHashMap<T> Data_;
+
+    static inline uint64_t GetTid() {
+        return static_cast<uint64_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+    }
 };
