@@ -6,7 +6,6 @@
 #include <iostream>
 #include <stdexcept>
 #include <map>
-#include <mutex>
 #include <type_traits>
 #include <vector>
 
@@ -155,10 +154,11 @@ public:
      *       1. resolver 根据当前状态 + pending_events_ 仲裁目标状态
      *       2. 状态切换：清空整批事件 → exit(old) → 原子切换 → enter(new)
      *       3. 状态保持：取出全部事件 → 按序匹配 rules_ → 合法事件执行 Action，非法事件丢弃
+     * @warning 线程安全：EventFsm 内部不再做线程同步。
+     *          多线程环境下，调用者必须通过外部串行化组件保证 Sync() 的串行执行。
      */
     void Sync() {
-        RecursionGuard recursion_guard(recursion_in_use_.Get());  // 1. 防递归
-        std::lock_guard<std::mutex> lock(action_mutex_);  // 2. 串行
+        RecursionGuard recursion_guard(recursion_in_use_.Get());  // 防递归
         StateEnum target = resolver_(current_state_.load(), pending_events_.Get());
         if (!SetStateInternal(target)) {
             throw std::runtime_error("Invalid state transition in Sync()");
@@ -170,10 +170,11 @@ public:
      * @param state 目标状态
      * @note 与当前状态相同时，不触发任何生命周期
      * @note 状态切换时，pending_events_ 会被清空（遵循"状态切换时事件全部丢弃"原则）
+     * @warning 线程安全：EventFsm 内部不再做线程同步。
+     *          多线程环境下，调用者必须通过外部串行化组件保证 SetState() 的串行执行。
      */
     void SetState(StateEnum state) {
-        RecursionGuard recursion_guard(recursion_in_use_.Get());  // 1. 防递归
-        std::lock_guard<std::mutex> lock(action_mutex_);  // 2. 串行
+        RecursionGuard recursion_guard(recursion_in_use_.Get());  // 防递归
         if (!SetStateInternal(state)) {
             throw std::runtime_error("Invalid state transition in SetState()");
         }
@@ -259,7 +260,6 @@ private:
     std::atomic<StateEnum>         current_state_;     // 当前状态（原子）
     ThreadLocal<bool> recursion_in_use_{false};  // 递归检测存储（实例级）
     ThreadLocal<std::vector<EventEnum>> pending_events_;     // 待处理事件队列（线程本地）
-    std::mutex                     action_mutex_;       // 并发-串行化锁
 
     const std::map<Key, Action>          rules_;              // 状态-事件规则
     const std::map<StateEnum, Lifecycle> lifecycles_;         // 状态生命周期
