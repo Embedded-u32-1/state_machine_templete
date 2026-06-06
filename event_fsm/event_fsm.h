@@ -155,7 +155,7 @@ public:
      *       2. 状态切换：清空整批事件 → exit(old) → 原子切换 → enter(new)
      *       3. 状态保持：取出全部事件 → 按序匹配 rules_ → 合法事件执行 Action，非法事件丢弃
      * @warning 线程安全：EventFsm 内部不再做线程同步。
-     *          多线程环境下，调用者必须通过外部串行化组件保证 Sync() 的串行执行。
+     *          Sync() 与 SetState() 不可并发执行，同一时刻仅允许一个线程调用其中之一。
      */
     void Sync() {
         RecursionGuard recursion_guard(recursion_in_use_.Get());  // 防递归
@@ -171,7 +171,7 @@ public:
      * @note 与当前状态相同时，不触发任何生命周期
      * @note 状态切换时，pending_events_ 会被清空（遵循"状态切换时事件全部丢弃"原则）
      * @warning 线程安全：EventFsm 内部不再做线程同步。
-     *          多线程环境下，调用者必须通过外部串行化组件保证 SetState() 的串行执行。
+     *          Sync() 与 SetState() 不可并发执行，同一时刻仅允许一个线程调用其中之一。
      */
     void SetState(StateEnum state) {
         RecursionGuard recursion_guard(recursion_in_use_.Get());  // 防递归
