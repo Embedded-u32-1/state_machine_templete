@@ -499,8 +499,8 @@ Stopped ──[Play]──> Playing ──[Stop]──> Stopped
 | 资源 | 线程安全 | 说明 |
 |------|----------|------|
 | [`CurrentState()`](event_fsm/event_fsm.h#L187) | ✅ | `std::atomic` 保护，原子读取 |
-| [`Sync()`](event_fsm/event_fsm.h#L154) | ✅ | 内部有 `mutex`，串行执行 |
-| [`SetState()`](event_fsm/event_fsm.h#L176) | ✅ | 内部有 `mutex`，串行执行 |
+| [`Sync()`](event_fsm/event_fsm.h#L154) | ⚠️ | **内部无锁**，调用者须保证串行执行 |
+| [`SetState()`](event_fsm/event_fsm.h#L176) | ⚠️ | **内部无锁**，调用者须保证串行执行 |
 | [`Post()`](event_fsm/event_fsm.h#L147) | ✅ | `ThreadLocal` 队列，线程本地存储 |
 | `rules_` | ✅ | `const`，只读 |
 | `lifecycles_` | ✅ | `const`，只读 |
@@ -508,20 +508,30 @@ Stopped ──[Play]──> Playing ──[Stop]──> Stopped
 | `validator_` | ⚠️ | 用户需保证回调线程安全 |
 | `on_transition_` | ⚠️ | 用户需保证回调线程安全 |
 
-### 推荐使用方式
+> **重要变更**：从当前版本起，`EventFsm` 内部移除了 `action_mutex_`。
+> 多线程环境下，**必须由外部串行化组件**（如单线程队列、strand、mutex 等）保证 [`Sync()`](event_fsm/event_fsm.h#L154) / [`SetState()`](event_fsm/event_fsm.h#L176) 的串行调用。
+
+### 推荐使用方式（外部串行化）
 
 ```cpp
+// 方式1：使用外部 mutex 串行化
 std::mutex mtx;
 EventFsm fsm(State::kIdle, rules, lifecycles, resolver, validator);
 
 {
-    std::lock_guard<std::mutex> lock(mtx);  // 保护业务数据
-    fsm.Post(Event::kStart);  // Post() 是线程安全的
-    fsm.Sync();  // Sync() 内部已保证串行执行
+    std::lock_guard<std::mutex> lock(mtx);  // 外部串行化
+    fsm.Post(Event::kStart);  // Post() 线程安全（ThreadLocal）
+    fsm.Sync();               // Sync() 需外部保证串行
 }
+
+// 方式2：使用串行化组件（如单线程任务队列 / strand）
+// strand.Post([&]() {
+//     fsm.Post(Event::kStart);
+//     fsm.Sync();
+// });
 ```
 
-> **注意**：[`Sync()`](event_fsm/event_fsm.h#L154) 内部已有 `mutex` 保证串行执行，外部加锁是为了保护业务层的共享数据。
+> **注意**：去锁后 `EventFsm` 内核更轻量，串行化策略完全交由调用者控制，可灵活适配业务层的调度模型。
 
 ### 递归检测
 
